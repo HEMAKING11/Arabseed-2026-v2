@@ -1,13 +1,15 @@
-# arabseed_telegram_bot.py
+# arabseed_telegram_bot_final.py
 import os
 import re
 import sys
 import json
 import time
+import random
 import logging
 import traceback
-from urllib.parse import urlparse, unquote, urlunparse, quote
-from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse, unquote, urlunparse, quote, parse_qs
+from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
@@ -19,7 +21,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
     ContextTypes,
-    CallbackContext
 )
 
 # ----------------- إعدادات التسجيل -----------------
@@ -30,17 +31,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------- إعدادات البوت -----------------
-# استخدم متغير بيئة أو ضع التوكن هنا مباشرة
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7064549403:AAHWQsrZPekW1M9kHacqB6N19aMj_xjspf4")
 
-# ----------------- الألوان (للطباعة فقط) -----------------
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    RESET = '\033[0m'
+# ----------------- قائمة User-Agents -----------------
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+]
 
 # ----------------- إدارة الجلسات -----------------
 class UserSession:
@@ -51,6 +51,7 @@ class UserSession:
         self.builder_func = None
         self.last_url = ""
         self.last_title = ""
+        self.history = []
         
     def reset(self):
         self.processing = False
@@ -65,7 +66,7 @@ def get_user_session(user_id: int) -> UserSession:
         user_sessions[user_id] = UserSession()
     return user_sessions[user_id]
 
-# ----------------- دوال المساعدة (من الكود الأصلي) -----------------
+# ----------------- دوال المساعدة المحسنة -----------------
 def extract_base_url(url: str) -> str:
     """استخراج الرابط الأساسي"""
     parsed_url = urlparse(url)
@@ -73,40 +74,75 @@ def extract_base_url(url: str) -> str:
 
 def extract_title_from_url(url: str) -> str:
     """استخراج العنوان من الرابط"""
-    parsed_url = urlparse(url)
-    path = unquote(parsed_url.path)
-    path_parts = path.strip('/').split('-')
-    title = ' '.join(path_parts).replace('.html', '').title()
-    if title.startswith("مسلسل"):
-        words = title.split()
-        new_title = []
-        for word in words:
-            new_title.append(word)
-            if any(char.isdigit() for char in word):
-                break
-        title = ' '.join(new_title)
-    return title
-
-def follow_redirect(url: str, session: Optional[requests.Session] = None, headers: Optional[Dict] = None, timeout: int = 10) -> Optional[str]:
-    """تتبع إعادة التوجيه"""
-    if session is None:
-        session = requests.Session()
-    if headers is None:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
     try:
-        r = session.get(url, headers=headers, allow_redirects=False, timeout=timeout)
-        if 'location' in r.headers:
-            loc = r.headers['location']
-            logger.info(f"Found location header: {loc}")
-            return loc
-        r2 = session.get(url, headers=headers, allow_redirects=True, timeout=timeout)
-        final = r2.url
-        logger.info(f"Final URL after redirects: {final}")
-        return final
-    except Exception as e:
-        logger.error(f"Error following redirect: {e}")
-        return None
+        parsed_url = urlparse(url)
+        path = unquote(parsed_url.path)
+        path_parts = path.strip('/').split('-')
+        title = ' '.join(path_parts).replace('.html', '').replace('.php', '').title()
+        
+        if title.startswith("مسلسل"):
+            words = title.split()
+            new_title = []
+            for word in words:
+                new_title.append(word)
+                if any(char.isdigit() for char in word):
+                    break
+            title = ' '.join(new_title)
+        return title
+    except:
+        return "عنوان غير معروف"
+
+def get_random_headers() -> Dict:
+    """الحصول على هيدرات عشوائية"""
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "ar,en-US;q=0.7,en;q=0.3",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0",
+        "TE": "Trailers",
+    }
+
+def make_request(url: str, max_retries: int = 3, session: Optional[requests.Session] = None) -> Optional[requests.Response]:
+    """طلب محسن مع إعادة محاولة"""
+    headers = get_random_headers()
+    
+    for attempt in range(max_retries):
+        try:
+            if session:
+                response = session.get(
+                    url,
+                    headers=headers,
+                    timeout=20,
+                    allow_redirects=True,
+                    verify=False  # إيقاف التحقق من SSL مؤقتاً
+                )
+            else:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    timeout=20,
+                    allow_redirects=True,
+                    verify=False
+                )
+            
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 403:
+                logger.warning(f"403 Forbidden on attempt {attempt + 1}")
+                time.sleep(2 ** attempt)  # زيادة وقت الانتظار تدريجياً
+                headers = get_random_headers()  # تغيير الهيدرات
+            else:
+                logger.warning(f"Status {response.status_code} on attempt {attempt + 1}")
+                time.sleep(1)
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error on attempt {attempt + 1}: {e}")
+            time.sleep(2 ** attempt)
+    
+    return None
 
 def find_last_numeric_segment_in_path(path_unquoted: str) -> Tuple[Optional[int], Optional[str]]:
     """إيجاد الجزء الرقمي الأخير في المسار"""
@@ -139,280 +175,296 @@ def extract_episode_and_base(url: str) -> Tuple[Optional[int], Optional[callable
         return None, None
     return int(num), lambda ep: build_episode_url_from_any(url, ep)
 
-# ----------------- دالة استخراج معلومات التحميل (مطابقة للكود الأصلي) -----------------
+# ----------------- دالة استخراج معلومات التحميل المحسنة -----------------
 def get_download_info(server_href: str, referer: str) -> Optional[Dict]:
     """استخراج معلومات التحميل من رابط السيرفر"""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Referer": referer
-    })
-
     try:
-        logger.info(f"Processing server link: {server_href}")
+        session = requests.Session()
+        headers = get_random_headers()
+        headers["Referer"] = referer
+        session.headers.update(headers)
         
-        # تتبع إعادة التوجيه
-        redirected = follow_redirect(server_href, session=session)
-        if not redirected:
-            logger.error(f"Couldn't obtain redirected r-link for {server_href}")
+        logger.info(f"🔍 جاري معالجة: {server_href}")
+        
+        # الخطوة 1: تتبع إعادة التوجيه
+        try:
+            response = session.get(server_href, timeout=15, allow_redirects=False)
+            if response.status_code in [301, 302, 303, 307, 308] and 'location' in response.headers:
+                redirected_url = response.headers['location']
+                if not redirected_url.startswith('http'):
+                    base = extract_base_url(server_href)
+                    redirected_url = base + redirected_url
+                logger.info(f"↪️ تم التوجيه إلى: {redirected_url}")
+                server_href = redirected_url
+        except:
+            pass
+        
+        # الخطوة 2: الحصول على الصفحة الرئيسية
+        response = make_request(server_href, session=session)
+        if not response:
             return None
-
-        # البحث عن رابط ?r=
+        
+        html_content = response.text
+        
+        # البحث عن رابط ?r= أو downloadz
         r_link = None
-        if '?r=' in redirected:
-            r_link = redirected
-        else:
-            tmp = session.get(redirected, timeout=12)
-            m = re.search(r'(https?://[^"\'>\s]+/category/downloadz/\?r=\d+[^"\'>\s]*)', tmp.text)
-            if m:
-                r_link = m.group(1)
-            elif '?r=' in tmp.url:
-                r_link = tmp.url
-            else:
-                if 'location' in tmp.headers and '?r=' in tmp.headers['location']:
-                    r_link = tmp.headers['location']
+        patterns = [
+            r'(https?://[^"\'>\s]+/category/downloadz/\?r=\d+[^"\'>\s]*)',
+            r'(https?://[^"\'>\s]+\?r=\d+[^"\'>\s]*)',
+            r'href=["\']([^"\']+downloadz[^"\']*)["\']',
+            r'window\.location\s*=\s*["\']([^"\']+)["\']',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            if matches:
+                r_link = matches[0]
+                if r_link.startswith('//'):
+                    r_link = 'https:' + r_link
+                elif not r_link.startswith('http'):
+                    r_link = extract_base_url(server_href) + r_link
+                break
         
         if not r_link:
-            logger.error(f"Could not find ?r= link for {server_href}")
+            # إذا لم نجد، استخدم الرابط الحالي
+            r_link = response.url
+        
+        logger.info(f"✅ وجدت رابط التحميل: {r_link}")
+        
+        # الخطوة 3: جلب صفحة التحميل
+        time.sleep(0.5)  # تأخير بسيط
+        response = make_request(r_link, session=session)
+        if not response:
             return None
-
-        logger.info(f"Found r_link: {r_link}")
-
-        # تحليل صفحة التحميل
-        rpage = session.get(r_link, timeout=12)
-        rsoup = BeautifulSoup(rpage.text, 'html.parser')
-
-        # البحث عن زر التحميل
-        btn_tag = rsoup.find('a', id='btn') or rsoup.select_one('a.downloadbtn') or rsoup.find('a', class_='downloadbtn')
-        final_asd_url = None
-
-        if btn_tag and btn_tag.get('href'):
-            candidate = btn_tag.get('href')
-            if candidate.startswith('/'):
-                candidate = extract_base_url(r_link) + candidate
-            final_asd_url = candidate
-            logger.info(f"Found btn href: {final_asd_url}")
-        else:
-            # محاولة إنشاء الرابط ديناميكياً
-            dynamic_param_pattern = r'([?&][a-zA-Z0-9_]+\d*=[^"&\']+)'
-            qs_matches = re.findall(dynamic_param_pattern, rpage.text)
-            params = []
-            for q in qs_matches:
-                normalized_param = q.lstrip('?&')
-                if normalized_param.lower().startswith('r='):
-                    continue
-                param_name = normalized_param.split('=', 1)[0]
-                if not any(p.startswith(param_name + '=') for p in params):
-                    params.append(normalized_param)
-            
-            if params:
-                sep = '&' if '?' in r_link else '?'
-                final_asd_url = r_link + sep + '&'.join(params)
-                logger.info(f"Constructed dynamic url: {final_asd_url}")
-
-        if not final_asd_url:
-            logger.warning("Falling back to r_link only")
-            final_asd_url = r_link
-
-        # الحصول على الرابط النهائي
-        final_resp = session.get(final_asd_url, timeout=15)
-        if final_resp.status_code != 200:
-            logger.error(f"Failed loading final url (status {final_resp.status_code})")
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # البحث عن رابط التحميل النهائي
+        final_link = None
+        
+        # البحث في جميع الروابط
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            # البحث عن روابط MP4 أو direct
+            if re.search(r'\.(mp4|m3u8|mkv|avi)$', href, re.IGNORECASE) or 'direct' in href.lower() or 'download' in href.lower():
+                final_link = href
+                if not final_link.startswith('http'):
+                    final_link = extract_base_url(r_link) + final_link
+                break
+        
+        # إذا لم نجد، نبحث في النصوص البرمجية
+        if not final_link:
+            script_tags = soup.find_all('script')
+            for script in script_tags:
+                if script.string:
+                    # البحث في JavaScript
+                    patterns = [
+                        r'src=["\']([^"\']+\.mp4[^"\']*)["\']',
+                        r'file["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+                        r'url["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+                        r'["\']?(?:file|url|src)["\']?\s*:\s*["\']([^"\']+)["\']',
+                    ]
+                    for pattern in patterns:
+                        match = re.search(pattern, script.string, re.IGNORECASE)
+                        if match:
+                            final_link = match.group(1)
+                            if not final_link.startswith('http'):
+                                final_link = extract_base_url(r_link) + final_link
+                            break
+                if final_link:
+                    break
+        
+        # إذا لم نجد بعد، نستخدم بعض الاستراتيجيات البديلة
+        if not final_link:
+            # محاولة استخراج من iframe
+            iframe = soup.find('iframe', src=True)
+            if iframe:
+                final_link = iframe['src']
+                if not final_link.startswith('http'):
+                    final_link = extract_base_url(r_link) + final_link
+        
+        if not final_link:
+            logger.error("❌ لم أتمكن من استخراج رابط التحميل")
             return None
-            
-        fsoup = BeautifulSoup(final_resp.text, 'html.parser')
-
-        # البحث عن رابط MP4 النهائي
-        final_tag = fsoup.find('a', id='btn') or fsoup.find('a', class_='downloadbtn') or fsoup.find('a', href=re.compile(r'\.mp4'))
-        if not final_tag:
-            logger.error("Couldn't locate final .mp4 link")
-            return None
-
-        file_link = final_tag.get('href')
-        if file_link and file_link.startswith('/'):
-            file_link = extract_base_url(final_asd_url) + file_link
-
+        
+        logger.info(f"🎯 رابط التحميل النهائي: {final_link}")
+        
         # استخراج معلومات الملف
         file_name = None
         file_size = None
         
-        try:
-            name_span = fsoup.select_one('.TitleCenteral h3 span')
-            if name_span:
-                file_name = name_span.get_text(strip=True)
+        # البحث عن العنوان والحجم
+        title_elem = soup.find(['h1', 'h2', 'h3', 'title'])
+        if title_elem:
+            title_text = title_elem.get_text(strip=True)
+            # استخراج حجم الملف من النص
+            size_match = re.search(r'(\d+(?:\.\d+)?)\s*(MB|GB|KB)', title_text, re.IGNORECASE)
+            if size_match:
+                file_size = f"{size_match.group(1)} {size_match.group(2).upper()}"
             
-            size_span = fsoup.select_one('.TitleCenteral h3:nth-of-type(2) span')
-            if size_span:
-                file_size = size_span.get_text(strip=True)
-        except Exception:
-            pass
-
-        if not file_size:
-            h3 = fsoup.find('h3')
-            if h3:
-                msize = re.search(r'الحجم[:\s\-–]*([\d\.,]+\s*(?:MB|GB))', h3.get_text())
-                if msize:
-                    file_size = msize.group(1)
-
+            # استخدام العنوان كاسم ملف
+            file_name = title_text[:50]  # تقليل الطول
+        
+        # إذا لم نجد اسماً، نستخدم اسم الملف من الرابط
         if not file_name:
-            file_name = os.path.basename(file_link) if file_link else "unknown"
-
+            file_name = os.path.basename(final_link).split('?')[0] or "ملف_تحميل"
+        
+        # إذا لم نجد حجماً، نستخدم قيمة افتراضية
+        if not file_size:
+            file_size = "غير معروف"
+        
+        # تنظيف الرابط
+        final_link = final_link.replace(" ", "%20")
+        
         return {
-            'direct_link': file_link.replace(" ", ".") if file_link else None,
+            'direct_link': final_link,
             'file_name': file_name,
-            'file_size': file_size or "Unknown"
+            'file_size': file_size
         }
-
+        
     except Exception as e:
-        logger.error(f"Error extracting download info: {e}")
+        logger.error(f"❌ خطأ في استخراج معلومات التحميل: {e}")
         return None
 
-# ----------------- دالة معالجة الحلقة (مطابقة للكود الأصلي) -----------------
-def process_single_episode(arabseed_url: str, session: requests.Session) -> Tuple[bool, Optional[str], Optional[List[List[Dict]]]]:
-    """
-    معالجة حلقة واحدة
-    ترجع: (نجاح/فشل, رسالة/عنوان, قائمة الأزرار)
-    """
+# ----------------- دالة المعالجة الرئيسية -----------------
+def process_arabseed_url(url: str) -> Tuple[bool, str, List[List[Dict]]]:
+    """معالجة رابط عرب سيد"""
+    session = requests.Session()
+    headers = get_random_headers()
+    session.headers.update(headers)
+    
     try:
-        # تتبع الروابط المختصرة
-        if '/l/' in arabseed_url or 'reviewrate.net' in arabseed_url:
-            arabseed_url = follow_redirect(arabseed_url, session=session) or arabseed_url
-
-        # جلب صفحة الحلقة
-        try:
-            resp = session.get(arabseed_url, timeout=12)
-        except Exception as e:
-            logger.error(f"Connection error: {e}")
-            return False, "❌ خطأ في الاتصال", None
-
+        logger.info(f"🚀 بدء معالجة الرابط: {url}")
+        
+        # الخطوة 1: جلب صفحة الحلقة
+        response = make_request(url, session=session)
+        if not response:
+            return False, "❌ تعذر الوصول إلى الرابط، تأكد من صحته", []
+        
+        # التحقق من أن الصفحة موجودة
+        if response.status_code != 200:
+            return False, f"❌ خطأ في جلب الصفحة (رمز: {response.status_code})", []
+        
+        html_content = response.text
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
         # التحقق من وجود الحلقة
-        if resp.status_code == 404:
-            return False, "❌ الحلقة غير موجودة (404)", None
-            
-        if resp.status_code != 200:
-            logger.warning(f"Status {resp.status_code} — retrying...")
-            time.sleep(1.2)
-            try:
-                resp = session.get(arabseed_url, timeout=12)
-            except Exception as e:
-                logger.error(f"Retry connection error: {e}")
-                return False, "❌ خطأ في الاتصال بعد إعادة المحاولة", None
-                
-            if resp.status_code != 200:
-                return False, f"❌ خطأ في جلب الحلقة (رمز: {resp.status_code})", None
-
-        # التحقق من محتوى الصفحة
-        text_lower = resp.text.lower()
-        if any(phrase in text_lower for phrase in ['لم يتم العثور', 'page not found', 'صفحة غير موجودة', 'not found']):
-            return False, "❌ الحلقة غير موجودة", None
-
-        # البحث عن رابط صفحة التحميل
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        download_anchor = soup.find('a', href=re.compile(r'/download/')) or soup.find('a', class_=re.compile(r'download__btn|downloadBTn'))
+        error_indicators = [
+            'لم يتم العثور',
+            'صفحة غير موجودة',
+            'not found',
+            '404',
+            'error',
+            'عذراً'
+        ]
         
-        if not download_anchor:
-            return False, "❌ لم يتم العثور على رابط التحميل", None
-
-        # جلب صفحة الجودات
-        quality_page_url = download_anchor.get('href')
-        if quality_page_url.startswith('/'):
-            quality_page_url = extract_base_url(arabseed_url) + quality_page_url
+        page_text = soup.get_text().lower()
+        if any(indicator in page_text for indicator in error_indicators):
+            return False, "❌ الحلقة غير موجودة أو الرابط غير صحيح", []
         
-        try:
-            qresp = session.get(quality_page_url, headers={'Referer': extract_base_url(arabseed_url)}, timeout=12)
-            if qresp.status_code != 200:
-                return False, "❌ خطأ في جلب صفحة الجودات", None
-        except Exception as e:
-            logger.error(f"Error loading quality page: {e}")
-            return False, "❌ خطأ في الاتصال بصفحة الجودات", None
-
-        # استخراج روابط السيرفرات
-        qsoup = BeautifulSoup(qresp.text, 'html.parser')
-        server_links = qsoup.find_all('a', href=re.compile(r'/l/'))
-        if not server_links:
-            server_links = qsoup.select('ul.downloads__links__list a') or qsoup.find_all('a', class_=re.compile(r'download__item|arabseed'))
-
-        if not server_links:
-            return False, "❌ لا توجد روابط تحميل متاحة", None
-
-        # معالجة كل سيرفر
+        # الخطوة 2: البحث عن روابط التحميل
+        download_links = []
+        
+        # البحث في الروابط
+        for a in soup.find_all('a', href=True):
+            href = a['href'].lower()
+            if any(keyword in href for keyword in ['download', 'تحميل', 'server', 'سيرفر', 'جودة', 'quality']):
+                download_links.append(a['href'])
+        
+        # إذا لم نجد، نبحث في الأزرار
+        if not download_links:
+            buttons = soup.find_all(['button', 'a'], text=re.compile(r'تحميل|تنزيل|download', re.IGNORECASE))
+            for btn in buttons:
+                if btn.get('onclick'):
+                    # استخراج الرابط من onclick
+                    match = re.search(r"location\.href=['\"]([^'\"]+)['\"]", btn.get('onclick', ''))
+                    if match:
+                        download_links.append(match.group(1))
+        
+        # إذا لم نجد بعد، نستخدم بعض الروابط الشائعة
+        if not download_links:
+            # البحث عن أي رابط يحتوي على /download/
+            for a in soup.find_all('a', href=re.compile(r'/download/', re.IGNORECASE)):
+                download_links.append(a['href'])
+        
+        if not download_links:
+            return False, "❌ لم أتمكن من العثور على روابط التحميل في الصفحة", []
+        
+        logger.info(f"🔗 وجدت {len(download_links)} روابط تحميل")
+        
+        # الخطوة 3: معالجة كل رابط
         buttons_data = []
-        referer = extract_base_url(quality_page_url) + "/"
-        seen_qualities = set()
-
-        for a in server_links:
-            href = a.get('href')
-            if not href:
-                continue
-                
-            # تخطي الروابط غير المباشرة
-            if 'arabseed' not in href and 'عرب سيد' not in a.get_text(" ", strip=True):
-                continue
-
-            # تحديد الجودة
-            quality = "Unknown"
-            parent_with_quality = a.find_parent(attrs={"data-quality": True})
-            if parent_with_quality:
-                quality = parent_with_quality.get('data-quality')
-            else:
-                ptxt = a.get_text(" ", strip=True)
-                qmatch = re.search(r'(\d{3,4}p)', ptxt)
-                if qmatch:
-                    quality = qmatch.group(1)
-                else:
-                    sq = a.find_previous('div', class_=re.compile(r'txt|text'))
-                    if sq:
-                        qmatch = re.search(r'(\d{3,4}p)', sq.get_text())
-                        if qmatch:
-                            quality = qmatch.group(1)
-
-            if quality in seen_qualities:
-                continue
-            seen_qualities.add(quality)
-
+        base_url = extract_base_url(url)
+        
+        for i, link in enumerate(download_links[:5]):  # نأخذ أول 5 روابط فقط
+            if not link.startswith('http'):
+                link = base_url + link
+            
+            logger.info(f"⚙️ معالجة الرابط {i+1}: {link}")
+            
             # استخراج معلومات التحميل
-            logger.info(f"Processing server link ({quality}): {href}")
-            info = get_download_info(href, referer)
+            info = get_download_info(link, base_url + "/")
             
             if info and info.get('direct_link'):
-                btn_text = f"[ {info.get('file_size','?')} ]  •  {quality}"
+                # تحديد الجودة
+                quality = "جودة عالية"
+                if '360' in link or '360' in info['file_name']:
+                    quality = "360p"
+                elif '480' in link or '480' in info['file_name']:
+                    quality = "480p"
+                elif '720' in link or '720' in info['file_name']:
+                    quality = "720p"
+                elif '1080' in link or '1080' in info['file_name']:
+                    quality = "1080p"
+                
+                # إنشاء زر
+                btn_text = f"📥 {quality} - {info['file_size']}"
                 buttons_data.append([{"text": btn_text, "url": info['direct_link']}])
-                logger.info(f"Added Quality: {quality} ({info.get('file_size')})")
-
+                
+                logger.info(f"✅ تم إضافة {quality}")
+            
+            # تأخير بسيط بين الطلبات
+            time.sleep(0.3)
+        
         if not buttons_data:
-            return False, "❌ لم أتمكن من استخراج روابط التحميل", None
-
+            return False, "❌ لم أتمكن من استخراج روابط تحميل صالحة", []
+        
         # استخراج العنوان
-        media_title = extract_title_from_url(arabseed_url)
-        return True, media_title, buttons_data
-
+        title = extract_title_from_url(url)
+        
+        logger.info(f"🎉 تمت المعالجة بنجاح: {title}")
+        return True, title, buttons_data
+        
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        return False, f"❌ حدث خطأ غير متوقع: {str(e)}", None
+        logger.error(f"❌ خطأ في معالجة الرابط: {e}")
+        return False, f"❌ حدث خطأ غير متوقع: {str(e)}", []
 
 # ----------------- دوال Telegram -----------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر /start"""
     user = update.effective_user
     welcome_text = f"""
-🎬 *مرحباً {user.first_name}!*
+🎬 *مرحباً {user.first_name}!* 
 
 🤖 *بوت تحميل عرب سيد المباشر*
 
 🔗 *كيفية الاستخدام:*
 1. أرسل رابط حلقة من موقع عرب سيد
-2. انتظر حتى تتم معالجة الرابط
+2. انتظر قليلاً حتى تتم المعالجة
 3. اختر جودة التحميل من الأزرار
 
 📌 *مثال للرابط:*
+`https://arabseed.top/مسلسل-العنكبوت-الحلقة-1`
+أو
 `https://arabseed.cam/مسلسل-العنكبوت-الحلقة-1.html`
 
 🎯 *مميزات البوت:*
 • تحميل مباشر بجودات متعددة
-• دعم الروابط المختصرة
+• دعم جميع روابط عرب سيد
 • واجهة سهلة الاستخدام
+• يعمل 24/7
 
-⚡ *يعمل 24/7 دون توقف*
+⚡ *للبدء:* أرسل رابط الحلقة الآن!
     """
     
     keyboard = [
@@ -428,21 +480,28 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 📖 *تعليمات استخدام البوت:*
 
-1. 🔍 اذهب إلى موقع عرب سيد
+1. 🔍 اذهب إلى موقع عرب سيد (arabseed.top أو arabseed.cam)
 2. 📋 انسخ رابط الحلقة المطلوبة
 3. 📩 أرسل الرابط هنا في البوت
-4. ⏳ انتظر قليلاً حتى تتم المعالجة
+4. ⏳ انتظر قليلاً (10-20 ثانية)
 5. 📥 اختر جودة التحميل المناسبة
 
 ⚠️ *ملاحظات مهمة:*
-• البوت لا يخزن أي ملفات على سيرفراته
+• البوت لا يخزن أي ملفات
 • الجودة تعتمد على المصدر الأصلي
-• بعض الحلقات القديمة قد لا تعمل
+• قد لا تعمل بعض الحلقات القديمة
 
 🔄 *في حالة وجود مشكلة:*
-• تأكد من صحة الرابط
-• حاول مرة أخرى بعد قليل
-• تواصل مع الدعم عبر @arabseed_support
+1. تأكد من صحة الرابط
+2. حاول مرة أخرى بعد قليل
+3. تأكد أن الحلقة موجودة على الموقع
+4. تواصل مع الدعم @arabseed_support
+
+🎬 *مواقع مدعومة:*
+• arabseed.top
+• arabseed.cam
+• arabseed.ink
+• وأي موقع عرب سيد آخر
     """
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -460,15 +519,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     
     try:
-        # إرسال رسالة الانتظار
-        wait_msg = await update.message.reply_text("⏳ جاري معالجة الرابط، يرجى الانتظار...")
+        # التحقق من أن الرابط صالح
+        if not url.startswith(('http://', 'https://')):
+            await update.message.reply_text("❌ هذا ليس رابطاً صالحاً! يرجى إرسال رابط يبدأ بـ http:// أو https://")
+            session.processing = False
+            return
         
-        # إنشاء جلسة طلبات
-        req_session = requests.Session()
-        req_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        # التحقق من أن الرابط يحتوي على arabseed
+        if 'arabseed' not in url.lower():
+            await update.message.reply_text("⚠️ يبدو أن هذا الرابط ليس من موقع عرب سيد. تأكد من الرابط وحاول مرة أخرى.")
+            session.processing = False
+            return
+        
+        # إرسال رسالة الانتظار
+        wait_msg = await update.message.reply_text("⏳ جاري معالجة الرابط، يرجى الانتظار 10-20 ثانية...")
         
         # معالجة الرابط
-        success, title_or_msg, buttons_data = process_single_episode(url, req_session)
+        success, title_or_msg, buttons_data = process_arabseed_url(url)
         
         if success:
             # حذف رسالة الانتظار
@@ -479,7 +546,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for button_row in buttons_data:
                 row = []
                 for button in button_row:
-                    row.append(InlineKeyboardButton(button["text"], url=button["url"]))
+                    # تنظيف نص الزر
+                    clean_text = button["text"].replace("[", "").replace("]", "").strip()
+                    row.append(InlineKeyboardButton(clean_text, url=button["url"]))
                 keyboard.append(row)
             
             # إضافة أزرار إضافية
@@ -506,38 +575,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
             
-            # حفظ بيانات الجلسة
-            session.last_url = url
-            session.last_title = title_or_msg
+            # حفظ في التاريخ
+            session.history.append({
+                'url': url,
+                'title': title_or_msg,
+                'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
             
-            # التحقق مما إذا كان رابط مسلسل
-            if 'مسلسل' in unquote(urlparse(url).path) or 'الحلقة' in unquote(urlparse(url).path):
-                current_num, builder = extract_episode_and_base(url)
-                if current_num is not None and builder is not None:
-                    session.current_episode = current_num + 1  # الحلقة التالية
-                    session.builder_func = builder
-                    
-                    # سؤال المستخدم عن وضع التلقائي
-                    auto_keyboard = [
-                        [
-                            InlineKeyboardButton("✅ نعم", callback_data="auto_yes"),
-                            InlineKeyboardButton("❌ لا", callback_data="auto_no")
-                        ]
-                    ]
-                    auto_markup = InlineKeyboardMarkup(auto_keyboard)
-                    
-                    await update.message.reply_text(
-                        f"🎯 *تم اكتشاف مسلسل*\n\nهل تريد تفعيل الوضع التلقائي لتحميل الحلقات التالية تلقائياً؟",
-                        reply_markup=auto_markup,
-                        parse_mode='Markdown'
-                    )
-        
         else:
             await wait_msg.delete()
-            await update.message.reply_text(f"{title_or_msg}\n\n⚠️ تأكد من صحة الرابط وحاول مرة أخرى.")
+            
+            # رسالة خطأ أكثر وصفية
+            error_text = f"""
+{title_or_msg}
+
+🔍 *نصائح لحل المشكلة:*
+1. تأكد من أن الرابط يعمل في متصفحك
+2. تحقق من أن الحلقة موجودة على الموقع
+3. حاول استخدام رابط مختلف لنفس الحلقة
+4. قد يكون الموقع معطل مؤقتاً
+
+🔄 جرب رابطاً آخر من موقع عرب سيد
+            """
+            
+            keyboard = [
+                [InlineKeyboardButton("🔄 محاولة برابط آخر", callback_data="new_link")],
+                [InlineKeyboardButton("📢 قناة الدعم", url="https://t.me/arabseed_support")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(error_text, reply_markup=reply_markup, parse_mode='Markdown')
             
     except Exception as e:
-        logger.error(f"Error in handle_message: {e}\n{traceback.format_exc()}")
+        logger.error(f"❌ خطأ في handle_message: {e}\n{traceback.format_exc()}")
         await update.message.reply_text("❌ حدث خطأ غير متوقع، يرجى المحاولة مرة أخرى.")
         
     finally:
@@ -548,129 +618,44 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user_id = update.effective_user.id
-    session = get_user_session(user_id)
-    
     if query.data == "new_link":
-        await query.edit_message_text("🔄 أرسل رابط الحلقة الجديدة...")
-        
-    elif query.data == "auto_yes":
-        session.auto_mode = True
-        await query.edit_message_text("✅ *تم تفعيل الوضع التلقائي*\n\nجاري تحميل الحلقات التالية تلقائياً...", parse_mode='Markdown')
-        
-        # بدء التحميل التلقائي
-        await auto_process_episodes(update, context, user_id)
-        
-    elif query.data == "auto_no":
-        session.auto_mode = False
-        await query.edit_message_text("❌ *تم إلغاء الوضع التلقائي*\n\nيمكنك إرسال رابط جديد عندما تريد.", parse_mode='Markdown')
+        await query.edit_message_text("🔄 *أرسل رابط الحلقة الجديدة...*\n\nتأكد من أن الرابط من موقع عرب سيد ويبدأ بـ https://", parse_mode='Markdown')
 
-async def auto_process_episodes(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """معالجة الحلقات تلقائياً"""
-    session = get_user_session(user_id)
-    
-    if not session.auto_mode:
-        return
-    
-    max_episodes = 10  # أقصى عدد حلقات لتجنب التحميل الزائد
-    
-    for i in range(max_episodes):
-        if not session.auto_mode:
-            break
-            
-        if session.builder_func is None:
-            break
-            
-        episode_url = session.builder_func(session.current_episode)
-        if not episode_url:
-            break
-        
-        try:
-            # إرسال رسالة تتبع
-            status_msg = await context.bot.send_message(
-                chat_id=user_id,
-                text=f"⏳ جاري معالجة الحلقة {session.current_episode}..."
-            )
-            
-            # معالجة الحلقة
-            req_session = requests.Session()
-            req_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            
-            success, title_or_msg, buttons_data = process_single_episode(episode_url, req_session)
-            
-            if success:
-                # تحويل البيانات إلى أزرار
-                keyboard = []
-                for button_row in buttons_data:
-                    row = []
-                    for button in button_row:
-                        row.append(InlineKeyboardButton(button["text"], url=button["url"]))
-                    keyboard.append(row)
-                
-                keyboard.append([
-                    InlineKeyboardButton("⏹ إيقاف التلقائي", callback_data="stop_auto")
-                ])
-                
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                # إرسال النتيجة
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"🎬 *الحلقة {session.current_episode} - {title_or_msg}*\n\n📥 روابط التحميل:",
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
-                
-                # الانتقال للحلقة التالية
-                session.current_episode += 1
-                
-                # تأخير قصير بين الحلقات
-                await asyncio.sleep(2)
-                
-            else:
-                # إذا فشلت الحلقة، توقف التلقائي
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"⚠️ *تم إيقاف الوضع التلقائي*\n\n{title_or_msg}",
-                    parse_mode='Markdown'
-                )
-                session.auto_mode = False
-                break
-                
-            # حذف رسالة التتبع
-            await status_msg.delete()
-            
-        except Exception as e:
-            logger.error(f"Error in auto processing: {e}")
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"❌ حدث خطأ في معالجة الحلقة {session.current_episode}"
-            )
-            session.auto_mode = False
-            break
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فحص حالة البوت"""
+    status_text = """
+✅ *البوت يعمل بشكل طبيعي*
 
-async def stop_auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إيقاف الوضع التلقائي"""
-    user_id = update.effective_user.id
-    session = get_user_session(user_id)
-    session.auto_mode = False
-    await update.message.reply_text("⏹ *تم إيقاف الوضع التلقائي*", parse_mode='Markdown')
+🤖 *معلومات البوت:*
+• الحالة: 🟢 نشط
+• المستخدمين: {}
+• يعمل منذ: {}
+
+⚡ *آخر تحديث:* {}
+    """.format(
+        len(user_sessions),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        datetime.now().strftime("%H:%M:%S")
+    )
+    
+    await update.message.reply_text(status_text, parse_mode='Markdown')
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج الأخطاء"""
-    logger.error(f"Update {update} caused error {context.error}")
+    logger.error(f"❌ خطأ: {context.error}")
     
-    if update and update.effective_message:
-        try:
-            await update.effective_message.reply_text("❌ حدث خطأ غير متوقع، يرجى المحاولة مرة أخرى.")
-        except:
-            pass
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text("❌ حدث خطأ، جاري إعادة المحاولة...")
+    except:
+        pass
 
 # ----------------- التشغيل الرئيسي -----------------
 def main():
     """الدالة الرئيسية"""
-    print(f"{Colors.GREEN}🎬 بدء تشغيل بوت عرب سيد Telegram...{Colors.RESET}")
-    print(f"{Colors.CYAN}Token: {TOKEN[:10]}...{Colors.RESET}")
+    print("=" * 50)
+    print("🎬 بدء تشغيل بوت عرب سيد Telegram")
+    print("=" * 50)
     
     try:
         # إنشاء التطبيق
@@ -679,7 +664,7 @@ def main():
         # إضافة المعالجات
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("stop", stop_auto_command))
+        application.add_handler(CommandHandler("status", status_command))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(handle_callback))
         
@@ -687,16 +672,19 @@ def main():
         application.add_error_handler(error_handler)
         
         # بدء البوت
-        print(f"{Colors.GREEN}🤖 البوت يعمل الآن!{Colors.RESET}")
-        print(f"{Colors.YELLOW}اضغط Ctrl+C لإيقاف البوت{Colors.RESET}")
+        print("✅ البوت جاهز للعمل!")
+        print("📱 افتح Telegram وابحث عن البوت")
+        print("⚡ أرسل /start للبدء")
         
-        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False
+        )
         
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        print(f"{Colors.RED}❌ فشل تشغيل البوت: {e}{Colors.RESET}")
+        print(f"❌ فشل تشغيل البوت: {e}")
+        logger.error(f"فشل تشغيل البوت: {e}\n{traceback.format_exc()}")
 
 if __name__ == "__main__":
-    # إضافة asyncio للتشغيل التلقائي
-    import asyncio
     main()
